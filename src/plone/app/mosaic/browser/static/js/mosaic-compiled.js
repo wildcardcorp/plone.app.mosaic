@@ -9,8 +9,9 @@ define('mosaic-url/mosaic.tile',[
   'mockup-utils',
   'pat-registry',
   'mockup-patterns-tinymce',
-  'tinymce'
-], function($, logger, _, utils, Registry, TinyMCE, tinymce) {
+  'tinymce',
+  'mockup-patterns-modal'
+], function($, logger, _, utils, Registry, TinyMCE, tinymce, Modal) {
   'use strict';
 
   var log = logger.getLogger('pat-mosaic');
@@ -128,6 +129,20 @@ define('mosaic-url/mosaic.tile',[
     return tile_url;
   };
 
+  Tile.prototype.getDeleteUrl = function(){
+    var tile_url = this.getUrl();
+    // Calc delete url
+    var url = tile_url.split('?')[0];
+    url = url.split('@@');
+    var tile_type_id = url[1].split('/');
+    url = url[0] + '@@delete-tile/' + tile_type_id[0] + '/' + tile_type_id[1];
+    // Calc absolute delete url
+    if (url.match(/^\.\/.*/)) {
+      url = $.mosaic.options.context_url + url.replace(/^\./, '');
+    }
+    return url;
+  };
+
   Tile.prototype.getUrl = function(){
     var tile_url = this.$el.find('.tileUrl').html();
     if(!tile_url){
@@ -176,7 +191,8 @@ define('mosaic-url/mosaic.tile',[
               (classname[1] !== 'new') &&
               (classname[1] !== 'read-only') &&
               (classname[1] !== 'helper') &&
-              (classname[1] !== 'original')) {
+              (classname[1] !== 'original') &&
+              (classname[1] !== 'edited')) {
             tiletype = classname[1];
           }
         }
@@ -251,6 +267,7 @@ define('mosaic-url/mosaic.tile',[
         case "mosaic-helper-tile":
         case "mosaic-original-tile":
         case "mosaic-selected-tile":
+        case "mosaic-edited-tile":
           return false;
         default:
           return true;
@@ -365,13 +382,32 @@ define('mosaic-url/mosaic.tile',[
 
       this.makeMovable();
 
+      var buttons = [];
       // Add settings icon
       if (tile_config && tile_config.settings &&
             this.$el.hasClass('mosaic-read-only-tile') === false) {
-        this.$el.prepend(
-            $($.mosaic.document.createElement("div"))
-                .addClass("mosaic-tile-control mosaic-info-icon")
-        );
+        var settingsBtn = document.createElement("button");
+        settingsBtn.className = "mosaic-btn-settings";
+        settingsBtn.textContent = 'Edit';
+        buttons.push(settingsBtn);
+        $(settingsBtn).on('click', this.settingsClicked.bind(this));
+      }
+
+      if(!$.mosaic.hasContentLayout){
+        var deleteBtn = document.createElement("button");
+        deleteBtn.className = "mosaic-btn-delete";
+        deleteBtn.textContent = 'Delete';
+        buttons.push(deleteBtn);
+        $(deleteBtn).on('click', this.deleteClicked.bind(this));
+      }
+
+      if(buttons.length > 0){
+        var $btns = $($.mosaic.document.createElement("div"))
+                 .addClass("mosaic-tile-control mosaic-tile-buttons");
+        this.$el.prepend($btns);
+        buttons.forEach(function($btn){
+          $btns.append($btn);
+        });
       }
 
       var that = this;
@@ -386,6 +422,124 @@ define('mosaic-url/mosaic.tile',[
         );
       });
     };
+
+    Tile.prototype.deleteClicked = function(e){
+      e.preventDefault();
+
+      if(!confirm('Are you certain you want to delete this tile?')){
+        return;
+      }
+
+      var tile_config = this.getConfig();
+
+      // Check if app tile
+      if (tile_config.tile_type === 'app') {
+
+        // Get url
+        var tile_url = this.getUrl();
+
+        if(tile_url){
+          // Remove tags
+          $.mosaic.removeHeadTags(tile_url);
+
+          // Ajax call to remove tile
+          $.ajax({
+            type: "POST",
+            url: this.getDeleteUrl(),
+            data: {
+              'buttons.delete': 'Delete',
+              '_authenticator': utils.getAuthenticator()
+            }
+          });
+        }
+      }
+
+      // Remove empty rows
+      $.mosaic.options.panels.find(".mosaic-empty-row").remove();
+
+      // Get original row
+      var $originalRow = this.$el.parent().parent();
+
+      // Save tile value
+      this.saveForm();
+
+      // Remove current tile
+      this.$el.remove();
+
+      $.mosaic.undo.snapshot();
+
+      // Cleanup original row
+      $originalRow.mosaicCleanupRow();
+
+      // Add empty rows
+      $.mosaic.options.panels.mosaicAddEmptyRows();
+
+      // Set toolbar
+      $.mosaic.options.toolbar.trigger("selectedtilechange");
+      $.mosaic.options.toolbar.mosaicSetResizeHandleLocation();
+    };
+
+    Tile.prototype.settingsClicked = function(e){
+      e.preventDefault();
+      var that = this;
+
+      // Get tile config
+      var tile_config = that.getConfig();
+
+      // Check if application tile
+      if (tile_config.tile_type === 'app') {
+
+        // Get url
+        var tile_url = that.getEditUrl();
+
+
+        // Open overlay
+        $.mosaic.overlay.app = new Modal($('.mosaic-toolbar'), {
+          ajaxUrl: tile_url,
+          loadLinksWithinModal: true,
+          buttons: '.formControls > input[type="submit"], .actionButtons > input[type="submit"]'
+        });
+        $.mosaic.overlay.app.$el.off('after-render');
+        $.mosaic.overlay.app.on('after-render', function(event) {
+          $('input[name*="cancel"]',
+            $.mosaic.overlay.app.$modal)
+            .off('click').on('click', function() {
+              // Close overlay
+              $.mosaic.overlay.app.hide();
+              $.mosaic.overlay.app = null;
+          });
+          if($.mosaic.hasContentLayout){
+            // not a custom layout, make sure the form knows
+            $('form', $.mosaic.overlay.app.$modal).append($('<input type="hidden" name="X-Tile-Persistent" value="yes" />'));
+          }
+        });
+        $.mosaic.overlay.app.show();
+        $.mosaic.overlay.app.$el.off('formActionSuccess');
+        $.mosaic.overlay.app.on('formActionSuccess', function (event, response, state, xhr, form) {
+          var tileUrl = xhr.getResponseHeader('X-Tile-Url'),
+            value = $.mosaic.getDomTreeFromHtml(response);
+          if (tileUrl) {
+            // Remove head tags
+            $.mosaic.removeHeadTags(tileUrl);
+
+            // Add head tags
+            $.mosaic.addHeadTags(tileUrl, value);
+            var tileHtml = value.find('.temp_body_tag').html();
+            // var $tile = that.$el.find('.mosaic-tile-content');
+            // $tile.html(tileHtml);
+            that.fillContent(tileHtml, tileUrl);
+
+            // Close overlay
+            $.mosaic.overlay.app.hide();
+            $.mosaic.overlay.app = null;
+          }
+        });
+      } else {
+
+        // Edit field
+        $.mosaic.overlay.open('field', tile_config);
+      }
+    },
 
     Tile.prototype.makeMovable = function(){
       // If the tile is movable
@@ -1361,77 +1515,6 @@ define('mosaic-url/mosaic.layout',[
     $($.mosaic.document).off("click", ".mosaic-tile").on("click", ".mosaic-tile", function () {
       var tile = new Tile(this);
       tile.select();
-    });
-
-    // On click open overlay
-    $($.mosaic.document).off("click", ".mosaic-info-icon").on("click", ".mosaic-info-icon", function () {
-
-      var tile = new Tile($(this).parents(".mosaic-tile"));
-
-      // Get tile config
-      var tile_config = tile.getConfig();
-
-      // Check if application tile
-      if (tile_config.tile_type === 'app') {
-
-        // Get url
-        var tile_url = tile.getEditUrl();
-
-        // Annotate the edited tile, because overlay will steal its focus
-        $(this).parents(".mosaic-tile").addClass('mosaic-edited-tile');
-
-        // Open overlay
-        $.mosaic.overlay.app = new Modal($('.mosaic-toolbar'), {
-          ajaxUrl: tile_url,
-          loadLinksWithinModal: true,
-          buttons: '.formControls > input[type="submit"], .actionButtons > input[type="submit"]'
-        });
-        $.mosaic.overlay.app.$el.off('after-render');
-        $.mosaic.overlay.app.on('after-render', function(event) {
-          $('input[name*="cancel"]',
-            $.mosaic.overlay.app.$modal)
-            .off('click').on('click', function() {
-              // Close overlay
-              $.mosaic.overlay.app.hide();
-              $.mosaic.overlay.app = null;
-
-              // Remove edited annotation
-              $('.mosaic-edited-tile', $.mosaic.document).removeClass('mosaic-edited-tile');
-          });
-          if($.mosaic.hasContentLayout){
-            // not a custom layout, make sure the form knows
-            $('form', $.mosaic.overlay.app.$modal).append($('<input type="hidden" name="X-Tile-Persistent" value="yes" />'));
-          }
-        });
-        $.mosaic.overlay.app.show();
-        $.mosaic.overlay.app.$el.off('formActionSuccess');
-        $.mosaic.overlay.app.on('formActionSuccess', function (event, response, state, xhr, form) {
-          var tileUrl = xhr.getResponseHeader('X-Tile-Url'),
-            value = $.mosaic.getDomTreeFromHtml(response);
-          if (tileUrl) {
-            // Remove head tags
-            $.mosaic.removeHeadTags(tileUrl);
-
-            // Add head tags
-            $.mosaic.addHeadTags(tileUrl, value);
-            var tileHtml = value.find('.temp_body_tag').html();
-            var $tile = $('.mosaic-edited-tile .mosaic-tile-content', $.mosaic.document);
-            $tile.html(tileHtml);
-            tile.fillContent(tileHtml, tileUrl);
-
-            // Close overlay
-            $.mosaic.overlay.app.hide();
-            $.mosaic.overlay.app = null;
-          }
-
-          // Remove edited annotation
-          $('.mosaic-edited-tile', $.mosaic.document).removeClass('mosaic-edited-tile');
-        });
-      } else {
-
-        // Edit field
-        $.mosaic.overlay.open('field', tile_config);
-      }
     });
 
     // Loop through matched elements
@@ -2604,7 +2687,11 @@ define('mosaic-url/mosaic.layout',[
         editor_id = $('#' + tile_config.id).find('textarea').attr('id');
         editor = tinymce.get(editor_id);
         if (editor) {
-          return editor.getContent();
+          try {
+              return editor.getContent();
+          } catch (e) {
+              return '<div class="discreet">Placeholder for field:<br/><b>' + tile_config.label + '</b></div>';
+          }
         } else {
           return '';
         }
@@ -3324,20 +3411,6 @@ define('mosaic-url/mosaic.toolbar',[
         }
       };
 
-
-
-      // Remove highlight
-      $(".mosaic-button-remove").hover(
-        function() {
-          $(".mosaic-selected-tile .mosaic-tile-content")
-            .addClass('mosaic-remove-target');
-        },
-        function() {
-          $(".mosaic-selected-tile .mosaic-tile-content")
-            .removeClass('mosaic-remove-target');
-        }
-      );
-
       // Bind method and add to array
       $(this).bind("selectedtilechange", SelectedTileChange);
 
@@ -3805,85 +3878,6 @@ define('mosaic-url/mosaic.actions',[
 
         // Reset menu
         $(source).select2("val", "none"); // $(source).val("none");
-      }
-    });
-
-    // Register page-insert action
-    $.mosaic.registerAction('remove', {
-      exec: function (source) {
-        $(".mosaic-selected-tile", $.mosaic.document).each(function() {
-          // Get tile config
-          var tile = new Tile(this);
-          var tile_config = tile.getConfig();
-
-          // Check if app tile
-          if (tile_config.tile_type === 'app') {
-
-            // Get url
-            var tile_url = tile.getUrl();
-
-            if(tile_url){
-              // Remove tags
-              $.mosaic.removeHeadTags(tile_url);
-
-              // Calc delete url
-              var url = tile_url.split('?')[0];
-              url = url.split('@@');
-              var tile_type_id = url[1].split('/');
-              url = url[0] + '@@delete-tile/' + tile_type_id[0] + '/' + tile_type_id[1];
-              // Calc absolute delete url
-              if (url.match(/^\.\/.*/)) {
-                url = $.mosaic.options.context_url + url.replace(/^\./, '');
-              }
-
-              // Ajax call to remove tile
-              $.ajax({
-                type: "GET",
-                url: url,
-                success: function (value) {
-                  var authenticator = $(value).find('[name="_authenticator"]').val();
-                  $.ajax({
-                    type: "POST",
-                    url: url,
-                    data: {
-                      'buttons.delete': 'Delete',
-                      '_authenticator': authenticator
-                    },
-                    success: function(value) {
-                    }
-                  });
-                }
-              });
-            }
-          }
-
-          // Remove empty rows
-          $.mosaic.options.panels.find(".mosaic-empty-row").remove();
-
-          // Get original row
-          var original_row = $(this).parent().parent();
-
-          // Save tile value
-          tile.saveForm();
-
-          // Remove current tile
-          $(this).remove();
-
-          $.mosaic.undo.snapshot();
-
-          // Cleanup original row
-          original_row.mosaicCleanupRow();
-
-          // Add empty rows
-          $.mosaic.options.panels.mosaicAddEmptyRows();
-
-          // Set toolbar
-          $.mosaic.options.toolbar.trigger("selectedtilechange");
-          $.mosaic.options.toolbar.mosaicSetResizeHandleLocation();
-        });
-      },
-      visible: function(){
-        return !$.mosaic.hasContentLayout;
       }
     });
 
