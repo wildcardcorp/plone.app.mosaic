@@ -144,7 +144,6 @@ def upgrade_to_1_0_0(context):
 
 
 def upgrade_to_1_0rc3(context):
-    import pdb; pdb.set_trace()
     registry = getUtility(IRegistry)
     actions = registry.get('plone.app.mosaic.default_available_actions', None)
     if actions and 'remove' in actions:
